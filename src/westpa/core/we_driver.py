@@ -70,6 +70,8 @@ class WEDriver:
 
     weight_split_threshold = 2.0
     weight_merge_cutoff = 1.0
+    largest_allowed_weight = 1
+    smallest_allowed_weight = 0
 
     def __init__(self, rc=None, system=None):
         self.rc = rc or westpa.rc
@@ -122,6 +124,12 @@ class WEDriver:
 
         self.weight_merge_cutoff = config.get(['west', 'we', 'weight_merge_cutoff'], self.weight_merge_cutoff)
         log.info('Merge cutoff: {}'.format(self.weight_merge_cutoff))
+
+        self.largest_allowed_weight = config.get(['west', 'we', 'largest_allowed_weight'], self.largest_allowed_weight)
+        log.info('Largest allowed weight: {}'.format(self.largest_allowed_weight))
+
+        self.smallest_allowed_weight = config.get(['west', 'we', 'smallest_allowed_weight'], self.smallest_allowed_weight)
+        log.info('Smallest_allowed_weight: {}'.format(self.smallest_allowed_weight))
 
     @property
     def next_iter_segments(self):
@@ -491,11 +499,14 @@ class WEDriver:
         if len(bin) > 0:
             assert target_count > 0
 
-        to_split = segments[weights > self.weight_split_threshold * ideal_weight]
+        to_split = segments[np.logical_and(weights > self.weight_split_threshold * ideal_weight,
+                                              weights/2 > float(self.smallest_allowed_weight))]
 
-        for segment in to_split:
-            m = int(math.ceil(segment.weight / ideal_weight))
-            self._split_walker(segment, m, bin)
+
+        if len(to_split) > 0:
+            for segment in to_split:
+                m = int(math.ceil(segment.weight / ideal_weight))
+                self._split_walker(segment, m, bin)
 
     def _merge_by_weight(self, ibin):
         '''Merge underweight particles'''
@@ -515,6 +526,9 @@ class WEDriver:
             if len(to_merge) < 2:
                 return
 
+            if sum(weights[:2]) >= float(self.largest_allowed_weight):
+                break
+
             self._merge_walkers(to_merge, cumul_weight, bin)
 
     def _adjust_count(self, ibin):
@@ -525,16 +539,36 @@ class WEDriver:
         # split
         while len(bin) < target_count:
             log.debug('adjusting counts by splitting')
-            # always split the highest probability walker into two
-            segments = sorted(bin, key=weight_getter)
-            self._split_walker(segments[-1], 2, bin)
+            segments = np.array(sorted(bin, key=weight_getter), dtype=np.object_)
+            weights = np.array(list(map(weight_getter, segments)))
+            # Check to see which walkers, when split, will result in
+            # a weight greater than the smallest allowed weight.
+            to_split = segments[weights/2 >= float(self.smallest_allowed_weight)]
+            print(len(segments), weights[:], len(to_split))
+            if len(to_split) < 1:
+                print("cannot split")
+                break
+            # then split the highest probability walker into two
+            self._split_walker(to_split[-1], 2, bin)
+            print("splitting occured")
 
         # merge
         while len(bin) > target_count:
             log.debug('adjusting counts by merging')
-            # always merge the two lowest-probability walkers
-            segments = sorted(bin, key=weight_getter)
-            self._merge_walkers(segments[:2], cumul_weight=None, bin=bin)
+            segments = np.array(sorted(bin, key=weight_getter), dtype=np.object_)
+            weights = np.array(list(map(weight_getter, segments)))
+            # Check to see if the two lowest-probability walkers have
+            # a combined weight less than the largest allowed weight.
+            print(len(segments), weights[:])
+            if sum(weights[:2]) <= float(self.largest_allowed_weight):
+                to_merge = segments[:2]
+            else:
+                print("cannot merge")
+                break
+            # then merge the two lowest-probability walkers
+            self._merge_walkers(to_merge, cumul_weight=None, bin=bin)
+            print("merging occured")
+        print("moving on...")
 
     def _check_pre(self):
         for ibin, _bin in enumerate(self.next_iter_binning):
